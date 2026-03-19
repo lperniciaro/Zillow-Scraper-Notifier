@@ -1,6 +1,6 @@
 # Zillow Rental Scraper
 
-Automated Zillow rental listing scraper with SMS/email alerts, VPN rotation, and advanced filtering.
+Automated Zillow rental listing scraper with SMS/email alerts, VPN rotation, and advanced filtering. I also created a VPN backed with gluetun and private internet access. It turns out, using a VPN instantly outsts you as a bot. I would recommend running locally on your home network instead.
 
 ## Features
 
