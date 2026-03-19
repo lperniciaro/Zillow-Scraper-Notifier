@@ -1,0 +1,146 @@
+# =============================================================================
+# Zillow Scraper Stack
+# =============================================================================
+# Architecture:
+#   gluetun        – PIA VPN tunnel with killswitch (all scraper traffic
+#                    is forced through this container's network stack)
+#   ip-rotator     – Sidecar that periodically restarts the VPN tunnel so
+#                    PIA assigns a fresh exit IP (anti-ban measure)
+#   zillow-scraper – Python scraper that runs on a cron-like schedule;
+#                    its network_mode is set to service:gluetun so every
+#                    outbound request exits through the VPN
+#
+# Usage:
+#   1. cp .env.example .env  →  fill in PIA credentials
+#   2. Edit config.json      →  set your zip codes / filters
+#   3. docker compose up -d
+#   4. docker logs -f zillow-scraper
+#   5. Results land in ./results/
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # GLUETUN – PIA VPN gateway
+  # ---------------------------------------------------------------------------
+  # The scraper container uses network_mode: service:gluetun, meaning ALL its
+  # network traffic exits through this VPN tunnel.  If the VPN drops, the
+  # killswitch blocks all traffic – no accidental clearnet requests.
+  # ---------------------------------------------------------------------------
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: zillow-gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=private internet access
+      - OPENVPN_USER=${PIA_USERNAME}
+      - OPENVPN_PASSWORD=${PIA_PASSWORD}
+      # Rotate through multiple regions so each reconnect may land on a
+      # different server (combined with ip-rotator sidecar).
+      - SERVER_REGIONS=${SERVER_REGIONS:-US East,US West,US Chicago,US Texas,US Seattle}
+      - VPN_PORT_FORWARDING=off
+      - DNS_ADDRESS=1.1.1.1
+      - UPDATER_PERIOD=24h
+      # Expose Gluetun's control REST API so ip-rotator can trigger reconnects
+      - HTTP_CONTROL_SERVER_ADDRESS=:8000
+      - HTTPPROXY=off
+      - SHADOWSOCKS=off
+      - HEALTH_VPN_DURATION_INITIAL=30s
+      - HEALTH_SUCCESS_WAIT_DURATION=10s
+    ports:
+      # Gluetun control server – host port 8100 avoids conflict with
+      # the media server stack which already binds 8000 and 8080.
+      - "8100:8000"
+    volumes:
+      - ./gluetun-data:/gluetun
+    restart: unless-stopped
+    healthcheck:
+      test: wget -qO- http://127.0.0.1:9999 > /dev/null || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # IP ROTATOR – Periodically reconnects the VPN for a fresh exit IP
+  # ---------------------------------------------------------------------------
+  # Uses Gluetun's control API to stop/start the OpenVPN engine.
+  # Default rotation interval: every 5 minutes (ROTATE_INTERVAL=300).
+  # Tune ROTATE_INTERVAL to balance freshness vs. connection overhead.
+  # ---------------------------------------------------------------------------
+  ip-rotator:
+    image: alpine:latest
+    container_name: zillow-ip-rotator
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - GLUETUN_HOST=gluetun        # resolved via gluetun's own network
+      - GLUETUN_PORT=8000
+      - ROTATE_INTERVAL=${ROTATE_INTERVAL:-300}
+    volumes:
+      - ./rotate_ip.sh:/rotate_ip.sh:ro
+    # ip-rotator talks to gluetun's control port directly on the gluetun
+    # container's localhost – no VPN network needed for this sidecar.
+    entrypoint: /bin/sh
+    command: /rotate_ip.sh
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # ZILLOW SCRAPER – Python bot
+  # ---------------------------------------------------------------------------
+  # network_mode: service:gluetun  →  shares gluetun's network namespace.
+  # Every HTTP request the scraper makes exits through the PIA VPN.
+  # The container restarts on exit so it runs repeatedly (see SCRAPE_INTERVAL).
+  # ---------------------------------------------------------------------------
+  zillow-scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zillow-scraper:latest
+    container_name: zillow-scraper
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - CONFIG_PATH=/app/config.json
+      - OUTPUT_DIR=/app/results
+      # How long to sleep between full scrape runs (seconds).
+      # Default: 1800 = 30 minutes.  Set to 0 to run once and exit.
+      - SCRAPE_INTERVAL=${SCRAPE_INTERVAL:-1800}
+      # --- SMS / Email alerts (Gmail API OAuth 2.0 → Verizon SMS gateway) ---
+      - GMAIL_USER=${GMAIL_USER}
+      - VERIZON_NUMBER=${VERIZON_NUMBER}
+      # OAuth credential files (generated by oauth_setup.py on your host)
+      - CREDENTIALS_PATH=/app/credentials.json
+      - TOKEN_PATH=/app/token.json
+      # Path to the file tracking which zpids have already been alerted.
+      # Stored in the shared results volume so it persists across restarts.
+      - NOTIFIED_PATH=/app/results/notified_zpids.json
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./results:/app/results
+      # OAuth files – credentials.json is read-only; token.json is read-write
+      # so the container can persist refreshed access tokens automatically.
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token.json:/app/token.json
+    # Loop wrapper: run scraper, sleep, repeat
+    entrypoint: /bin/sh
+    command: >
+      -c "
+        while true; do
+          echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting scrape run...\";
+          python -u /app/scraper.py;
+          if [ \"\${SCRAPE_INTERVAL:-1800}\" = '0' ]; then
+            echo 'SCRAPE_INTERVAL=0, exiting after single run.';
+            exit 0;
+          fi;
+          echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Sleeping \${SCRAPE_INTERVAL:-1800}s until next run...\";
+          sleep \"\${SCRAPE_INTERVAL:-1800}\";
+        done
+      "
+    restart: unless-stopped

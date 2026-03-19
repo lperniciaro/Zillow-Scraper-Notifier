@@ -1,0 +1,34 @@
+{
+  "_comment": "Zillow Scraper configuration. Edit zip_codes to match your target areas.",
+
+  "_comment_search_mode": "use_city_search=true fetches all of San Diego paginated then filters by zip locally. false queries each zip individually (faster, fewer pages).",
+  "use_city_search": false,
+
+  "zip_codes": [
+    "92126",
+    "92127",
+    "92128",
+    "92129",
+    "92130",
+    "92131",
+    "92121",
+    "92111",
+    "92117",
+    "92110",
+    "92064"
+  ],
+
+  "min_beds": 4,
+  "min_baths": 2.5,
+
+  "_comment_home_types": "Zillow values: SINGLE_FAMILY, TOWNHOUSE, CONDO, APARTMENT, MANUFACTURED, LOT, MULTI_FAMILY. null = no filter.",
+  "allowed_home_types": ["SINGLE_FAMILY"],
+
+  "min_price": 3000,
+  "max_price": 6000,
+
+  "avail_start": "2026-05-01",
+  "avail_end":   "2026-07-15",
+
+  "delay_between_zips_seconds": 8
+}
